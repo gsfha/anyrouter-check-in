@@ -5,6 +5,8 @@
 #   PROXY_TEST_URL          探测目标，默认 https://www.google.com/generate_204
 #   PROXY_REQUIRED          true 时探测失败则退出 1
 #   PROXY_PORT              本地 mixed-port，默认 7890
+#   PROXY_CONTROLLER_PORT   Mihomo 控制端口，默认 9090
+#   PROXY_NODE_LIMIT        最多探测的订阅节点数，默认 30
 
 set -euo pipefail
 
@@ -18,6 +20,8 @@ PROXY_PORT="${PROXY_PORT:-7890}"
 PROXY_TEST_URL="${PROXY_TEST_URL:-https://www.google.com/generate_204}"
 MIHOMO_VERSION="${MIHOMO_VERSION:-v1.19.0}"
 PROXY_REQUIRED="${PROXY_REQUIRED:-false}"
+PROXY_CONTROLLER_PORT="${PROXY_CONTROLLER_PORT:-9090}"
+PROXY_NODE_LIMIT="${PROXY_NODE_LIMIT:-30}"
 
 mkdir -p "${PROXY_DIR}"
 cd "${PROXY_DIR}"
@@ -43,6 +47,7 @@ ipv6: false
 mode: rule
 log-level: warning
 unified-delay: true
+external-controller: 127.0.0.1:${PROXY_CONTROLLER_PORT}
 
 proxy-providers:
   subscription:
@@ -57,11 +62,7 @@ proxy-providers:
 
 proxy-groups:
   - name: CHECKIN
-    type: url-test
-    url: "${PROXY_TEST_URL}"
-    interval: 300
-    tolerance: 150
-    lazy: false
+    type: select
     use:
       - subscription
 
@@ -74,6 +75,54 @@ nohup "${MIHOMO_BIN}" -d "${PROXY_DIR}" -f config.yaml > mihomo.log 2>&1 &
 echo $! > mihomo.pid
 
 PROXY_URL="http://127.0.0.1:${PROXY_PORT}"
+CONTROLLER_URL="http://127.0.0.1:${PROXY_CONTROLLER_PORT}"
+
+echo "[INFO] Waiting for subscription nodes..."
+CONTROLLER_READY=false
+for attempt in $(seq 1 45); do
+	if curl -fsS --max-time 5 "${CONTROLLER_URL}/proxies/CHECKIN" -o group.json 2>/dev/null; then
+		CONTROLLER_READY=true
+		break
+	fi
+	sleep 2
+done
+
+if [[ "${CONTROLLER_READY}" == "true" ]]; then
+	mapfile -t CANDIDATE_NODES < <(
+		python -c 'import json; data=json.load(open("group.json", encoding="utf-8")); print("\n".join(data.get("all", [])))'
+	)
+	echo "[INFO] Found ${#CANDIDATE_NODES[@]} subscription node(s); probing AgentRouter WAF..."
+	SELECTED_NODE=false
+	NODE_INDEX=0
+	for node in "${CANDIDATE_NODES[@]}"; do
+		((NODE_INDEX += 1))
+		if (( NODE_INDEX > PROXY_NODE_LIMIT )); then
+			break
+		fi
+		payload=$(python -c 'import json,sys; print(json.dumps({"name": sys.argv[1]}))' "$node")
+		if ! curl -fsS -X PUT -H "Content-Type: application/json" \
+			--data "$payload" "${CONTROLLER_URL}/proxies/CHECKIN" -o /dev/null 2>/dev/null; then
+			continue
+		fi
+		sleep 1
+		probe_file="${PROXY_DIR}/agentrouter-probe.html"
+		if curl --compressed -fsS -x "${PROXY_URL}" --max-time 18 \
+			"https://agentrouter.org/login" -o "${probe_file}" 2>/dev/null; then
+			if ! grep -Eqi 'aliyun_waf|aliyunCaptcha|Access Verification|sliding-slider|nc-container|verify you are human|请进行验证|访问受限' "${probe_file}"; then
+				SELECTED_NODE=true
+				echo "[SUCCESS] Selected a node that reaches AgentRouter without the verification page (candidate ${NODE_INDEX})"
+				break
+			fi
+		fi
+		echo "[INFO] Candidate ${NODE_INDEX} was blocked or unavailable"
+	done
+	if [[ "${SELECTED_NODE}" != "true" ]]; then
+		echo "[WARN] No clean AgentRouter node found in the first ${PROXY_NODE_LIMIT} candidate(s)"
+	fi
+else
+	echo "[WARN] Mihomo controller did not expose subscription nodes"
+fi
+
 READY=false
 for attempt in $(seq 1 45); do
 	if curl -fsS -x "${PROXY_URL}" --max-time 20 "${PROXY_TEST_URL}" -o /dev/null 2>/dev/null; then
