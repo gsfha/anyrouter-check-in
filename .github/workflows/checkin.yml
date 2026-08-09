@@ -93,6 +93,7 @@ jobs:
 
     - name: 配置代理
       env:
+        PROXY_SUBSCRIPTION_GZIP_B64: ${{ secrets.PROXY_SUBSCRIPTION_GZIP_B64 }}
         PROXY_SUBSCRIPTION_URL: ${{ secrets.PROXY_SUBSCRIPTION_URL }}
         PROXY_TEST_URL: https://www.google.com/generate_204
         MIHOMO_VERSION: v1.19.27
