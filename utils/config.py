@@ -150,6 +150,7 @@ class AccountConfig:
 	"""账号配置"""
 
 	cookies: dict | str | None
+	access_token: str | None = None
 	api_user: str | None = None
 	provider: str = 'anyrouter'
 	name: str | None = None
@@ -164,6 +165,7 @@ class AccountConfig:
 
 		return cls(
 			cookies=data.get('cookies'),
+			access_token=data.get('access_token'),
 			api_user=data.get('api_user'),
 			provider=provider,
 			name=name if name else None,
@@ -189,6 +191,14 @@ def load_accounts_config() -> list[AccountConfig] | None:
 
 	try:
 		accounts_data = json.loads(accounts_str)
+		extra_accounts_str = os.getenv('EXTRA_ACCOUNTS')
+		if extra_accounts_str:
+			extra_accounts_data = json.loads(extra_accounts_str)
+			if not isinstance(extra_accounts_data, list):
+				print('ERROR: EXTRA_ACCOUNTS must use array format [{}]')
+				return None
+			accounts_data.extend(extra_accounts_data)
+			print(f'[INFO] Loaded {len(extra_accounts_data)} extra account configuration(s)')
 	except json.JSONDecodeError as e:
 		print(f'ERROR: ANYROUTER_ACCOUNTS JSON 解析失败: {e}')
 		print('HINT: 常见原因 - 末尾多余逗号、使用了单引号、包含注释、或换行格式问题')
@@ -215,9 +225,10 @@ def load_accounts_config() -> list[AccountConfig] | None:
 
 			has_cookies = 'cookies' in account_dict and account_dict['cookies']
 			has_login = account_dict.get('email') and account_dict.get('password')
+			has_access_token = account_dict.get('access_token')
 
-			if not has_cookies and not has_login:
-				print(f'ERROR: Account {i + 1} must have either cookies or email+password')
+			if not has_cookies and not has_login and not has_access_token:
+				print(f'ERROR: Account {i + 1} must have cookies, email+password, or access_token')
 				return None
 
 			if 'name' in account_dict and not account_dict['name']:
