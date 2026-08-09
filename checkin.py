@@ -450,11 +450,14 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 
 	print(f'[INFO] {account_name}: Using provider "{account.provider}" ({provider_config.domain})')
 
-	# 邮箱密码优先
+	# 访问令牌优先，其次邮箱密码，最后使用浏览器会话 cookies
 	all_cookies = None
 	resolved_api_user: str | None = None
 	auth_method = None
-	if account.has_login_credentials():
+	if account.access_token:
+		all_cookies = {}
+		auth_method = 'access token'
+	elif account.has_login_credentials():
 		print(f'[INFO] {account_name}: Attempting email/password login (priority)...')
 		assert account.email is not None and account.password is not None
 		login_result = await login_with_credentials(
@@ -487,7 +490,7 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 		all_cookies = await prepare_cookies(account_name, provider_config, user_cookies)
 		auth_method = 'session cookies'
 
-	if not all_cookies:
+	if all_cookies is None:
 		return False, None, None
 
 	print(f'[AUTH] {account_name}: Using auth method -> {auth_method}')
@@ -545,6 +548,8 @@ def run_check_in_requests(
 			api_user = api_user_override or account.api_user
 			if api_user:
 				headers[provider_config.api_user_key] = api_user
+			if account.access_token:
+				headers['Authorization'] = account.access_token
 
 			user_info_url = f'{provider_config.domain}{provider_config.user_info_path}'
 			user_info_before = get_user_info(client, headers, user_info_url)
