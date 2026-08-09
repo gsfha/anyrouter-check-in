@@ -10,8 +10,8 @@
 
 set -euo pipefail
 
-if [[ -z "${PROXY_SUBSCRIPTION_URL:-}" ]]; then
-	echo "[INFO] PROXY_SUBSCRIPTION_URL not set, skip proxy setup"
+if [[ -z "${PROXY_SUBSCRIPTION_GZIP_B64:-}" && -z "${PROXY_SUBSCRIPTION_URL:-}" ]]; then
+	echo "[INFO] Proxy subscription is not set, skip proxy setup"
 	exit 0
 fi
 
@@ -40,14 +40,25 @@ gunzip -f "${ARCHIVE}"
 chmod +x "mihomo-linux-amd64-${MIHOMO_VERSION}"
 MIHOMO_BIN="${PROXY_DIR}/mihomo-linux-amd64-${MIHOMO_VERSION}"
 
-echo "[INFO] Downloading full subscription with Clash client identity..."
-if ! curl --retry 3 --retry-delay 5 --retry-all-errors -fsSL \
-	-A "clash.meta" -o subscription.yaml "${PROXY_SUBSCRIPTION_URL}"; then
-	echo "[WARN] Failed to download proxy subscription"
-	if [[ "${PROXY_REQUIRED}" == "true" ]]; then
-		exit 1
+if [[ -n "${PROXY_SUBSCRIPTION_GZIP_B64:-}" ]]; then
+	echo "[INFO] Restoring encrypted proxy subscription snapshot..."
+	if ! printf '%s' "${PROXY_SUBSCRIPTION_GZIP_B64}" | base64 --decode | gunzip > subscription.yaml; then
+		echo "[WARN] Failed to restore proxy subscription snapshot"
+		if [[ "${PROXY_REQUIRED}" == "true" ]]; then
+			exit 1
+		fi
+		exit 0
 	fi
-	exit 0
+else
+	echo "[INFO] Downloading full subscription with Clash client identity..."
+	if ! curl --retry 3 --retry-delay 5 --retry-all-errors -fsSL \
+		-A "clash.meta" -o subscription.yaml "${PROXY_SUBSCRIPTION_URL}"; then
+		echo "[WARN] Failed to download proxy subscription"
+		if [[ "${PROXY_REQUIRED}" == "true" ]]; then
+			exit 1
+		fi
+		exit 0
+	fi
 fi
 if ! grep -Eq '^[[:space:]]*proxies:' subscription.yaml; then
 	echo "[WARN] Subscription response does not contain a Clash proxies list"
