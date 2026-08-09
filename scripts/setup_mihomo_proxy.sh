@@ -6,7 +6,7 @@
 #   PROXY_REQUIRED          true 时探测失败则退出 1
 #   PROXY_PORT              本地 mixed-port，默认 7890
 #   PROXY_CONTROLLER_PORT   Mihomo 控制端口，默认 9090
-#   PROXY_NODE_LIMIT        最多探测的订阅节点数，默认 30
+#   PROXY_NODE_LIMIT        最多探测的订阅节点数，默认 60
 
 set -euo pipefail
 
@@ -40,6 +40,23 @@ gunzip -f "${ARCHIVE}"
 chmod +x "mihomo-linux-amd64-${MIHOMO_VERSION}"
 MIHOMO_BIN="${PROXY_DIR}/mihomo-linux-amd64-${MIHOMO_VERSION}"
 
+echo "[INFO] Downloading full subscription with Clash client identity..."
+if ! curl --retry 3 --retry-delay 5 --retry-all-errors -fsSL \
+	-A "clash.meta" -o subscription.yaml "${PROXY_SUBSCRIPTION_URL}"; then
+	echo "[WARN] Failed to download proxy subscription"
+	if [[ "${PROXY_REQUIRED}" == "true" ]]; then
+		exit 1
+	fi
+	exit 0
+fi
+if ! grep -Eq '^[[:space:]]*proxies:' subscription.yaml; then
+	echo "[WARN] Subscription response does not contain a Clash proxies list"
+	if [[ "${PROXY_REQUIRED}" == "true" ]]; then
+		exit 1
+	fi
+	exit 0
+fi
+
 cat > config.yaml <<EOF
 mixed-port: ${PROXY_PORT}
 allow-lan: false
@@ -51,12 +68,7 @@ external-controller: 127.0.0.1:${PROXY_CONTROLLER_PORT}
 
 proxy-providers:
   subscription:
-    type: http
-    url: "${PROXY_SUBSCRIPTION_URL}"
-    header:
-      User-Agent:
-        - "clash.meta"
-    interval: 3600
+    type: file
     path: ./subscription.yaml
     health-check:
       enable: true
