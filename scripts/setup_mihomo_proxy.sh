@@ -53,6 +53,9 @@ proxy-providers:
   subscription:
     type: http
     url: "${PROXY_SUBSCRIPTION_URL}"
+    header:
+      User-Agent:
+        - "clash.meta"
     interval: 3600
     path: ./subscription.yaml
     health-check:
