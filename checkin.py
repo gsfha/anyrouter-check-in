@@ -279,6 +279,89 @@ async def prepare_cookies(account_name: str, provider_config, user_cookies: dict
 	return {**waf_cookies, **user_cookies}
 
 
+async def run_browser_auto_check_in(
+	account_name: str,
+	provider_config,
+	user_cookies: dict,
+	api_user: str | None,
+) -> tuple[bool, dict | None, dict | None]:
+	"""在同一浏览器上下文中通过 WAF 并触发自动签到。"""
+	launch_kwargs: dict = {'headless': True}
+	proxy = get_playwright_proxy(use_proxy=provider_config.use_proxy)
+	if proxy:
+		launch_kwargs['proxy'] = proxy
+
+	browser = await launch_async(**launch_kwargs)
+	try:
+		page = await browser.new_page()
+		await prepare_browser_page(page)
+		await page.context.add_cookies(
+			[
+				{'name': name, 'value': value, 'url': provider_config.domain}
+				for name, value in user_cookies.items()
+				if name and value is not None
+			]
+		)
+		login_url = f'{provider_config.domain}{provider_config.login_path}'
+		await page.goto(login_url, wait_until='domcontentloaded')
+		await wait_for_waf_ready(page)
+
+		result = await page.evaluate(
+			"""async ({ path, headerName, apiUser }) => {
+				const request = async () => {
+					const headers = { Accept: 'application/json, text/plain, */*' };
+					if (apiUser) headers[headerName] = String(apiUser);
+					const response = await fetch(path, {
+						method: 'GET',
+						headers,
+						credentials: 'include',
+					});
+					const text = await response.text();
+					let data = null;
+					try { data = JSON.parse(text); } catch {}
+					return { status: response.status, data };
+				};
+				return { before: await request(), after: await request() };
+			}""",
+			{
+				'path': provider_config.user_info_path,
+				'headerName': provider_config.api_user_key,
+				'apiUser': api_user,
+			},
+		)
+
+		def build_info(raw: dict | None) -> dict | None:
+			payload = raw.get('data') if isinstance(raw, dict) else None
+			if not isinstance(payload, dict) or not payload.get('success'):
+				return None
+			user_data = payload.get('data') or {}
+			quota = round(user_data.get('quota', 0) / 500000, 2)
+			used_quota = round(user_data.get('used_quota', 0) / 500000, 2)
+			return {
+				'success': True,
+				'quota': quota,
+				'used_quota': used_quota,
+				'display': f':money: Current balance: ${quota}, Used: ${used_quota}',
+			}
+
+		before_info = build_info(result.get('before'))
+		after_info = build_info(result.get('after'))
+		final_info = after_info or before_info
+		if final_info:
+			print(final_info['display'])
+			print(f'[SUCCESS] {account_name}: Browser auto check-in completed')
+			return True, before_info, final_info
+
+		status = (result.get('after') or result.get('before') or {}).get('status', 'unknown')
+		print(f'[FAILED] {account_name}: Browser auto check-in failed - HTTP {status}')
+		return False, before_info, after_info
+	except Exception as exc:
+		print(f'[FAILED] {account_name}: Browser auto check-in failed - {str(exc)[:80]}')
+		return False, None, None
+	finally:
+		await browser.close()
+
+
 def execute_check_in(client, account_name: str, provider_config, headers: dict):
 	"""执行签到请求"""
 	print(f'[NETWORK] {account_name}: Executing check-in')
@@ -393,6 +476,14 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 		if not user_cookies:
 			print(f'[FAILED] {account_name}: Invalid configuration format')
 			return False, None, None
+		if provider_config.sign_in_path is None and provider_config.needs_waf_cookies():
+			print(f'[AUTH] {account_name}: Using auth method -> browser session cookies')
+			return await run_browser_auto_check_in(
+				account_name,
+				provider_config,
+				user_cookies,
+				account.api_user,
+			)
 		all_cookies = await prepare_cookies(account_name, provider_config, user_cookies)
 		auth_method = 'session cookies'
 
