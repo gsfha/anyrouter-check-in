@@ -117,7 +117,7 @@ async def get_waf_cookies_with_browser(
 		for cookie in cookies:
 			cookie_name = cookie.get('name')
 			cookie_value = cookie.get('value')
-			if cookie_name in required_cookies and cookie_value is not None:
+			if cookie_name and cookie_value is not None:
 				waf_cookies[cookie_name] = cookie_value
 
 		print(f'[INFO] {account_name}: Got {len(waf_cookies)} WAF cookies')
@@ -286,7 +286,10 @@ def execute_check_in(client, account_name: str, provider_config, headers: dict):
 	checkin_headers = headers.copy()
 	checkin_headers.update({'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'})
 
-	sign_in_url = f'{provider_config.domain}{provider_config.sign_in_path}'
+	sign_in_path = provider_config.sign_in_path
+	if provider_config.domain.rstrip('/') == 'https://api.futureppo.top':
+		sign_in_path = '/api/user/checkin'
+	sign_in_url = f'{provider_config.domain}{sign_in_path}'
 	response = client.post(sign_in_url, headers=checkin_headers, timeout=30)
 
 	print(f'[RESPONSE] {account_name}: Response status code {response.status_code}')
