@@ -130,6 +130,8 @@ async def get_waf_cookies_with_browser(
 			return None
 
 		print(f'[SUCCESS] {account_name}: Successfully got all WAF cookies')
+		browser_user_agent = await page.evaluate('navigator.userAgent')
+		waf_cookies['__browser_user_agent__'] = browser_user_agent
 		await browser.close()
 		return waf_cookies
 
@@ -429,10 +431,12 @@ def run_check_in_requests(
 			print(f'[WARN] {account_name}: Provider requires proxy but CHECKIN_PROXY_URL is not set')
 
 		with httpx.Client(**client_kwargs) as client:
-			client.cookies.update(all_cookies)
+			request_cookies = dict(all_cookies)
+			browser_user_agent = request_cookies.pop('__browser_user_agent__', None)
+			client.cookies.update(request_cookies)
 
 			headers = {
-				'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
+				'User-Agent': browser_user_agent or 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
 				'Accept': 'application/json, text/plain, */*',
 				'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
 				'Accept-Encoding': 'gzip, deflate, br, zstd',
