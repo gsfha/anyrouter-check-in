@@ -98,7 +98,7 @@ class AppConfig:
 				name='agentrouter',
 				domain='https://agentrouter.org',
 				login_path='/login',
-				sign_in_path=None,  # 无需签到接口，查询用户信息时自动完成签到
+				sign_in_path=None,  # 没有独立签到接口；重新登录时发放每日额度
 				user_info_path='/api/user/self',
 				api_user_key='new-api-user',
 				bypass_method='waf_cookies',
@@ -151,6 +151,7 @@ class AccountConfig:
 
 	cookies: dict | str | None
 	access_token: str | None = None
+	github_cookie: dict | str | None = None
 	api_user: str | None = None
 	provider: str = 'anyrouter'
 	name: str | None = None
@@ -166,6 +167,7 @@ class AccountConfig:
 		return cls(
 			cookies=data.get('cookies'),
 			access_token=data.get('access_token'),
+			github_cookie=data.get('github_cookie'),
 			api_user=data.get('api_user'),
 			provider=provider,
 			name=name if name else None,
@@ -226,9 +228,10 @@ def load_accounts_config() -> list[AccountConfig] | None:
 			has_cookies = 'cookies' in account_dict and account_dict['cookies']
 			has_login = account_dict.get('email') and account_dict.get('password')
 			has_access_token = account_dict.get('access_token')
+			has_github_cookie = account_dict.get('github_cookie')
 
-			if not has_cookies and not has_login and not has_access_token:
-				print(f'ERROR: Account {i + 1} must have cookies, email+password, or access_token')
+			if not has_cookies and not has_login and not has_access_token and not has_github_cookie:
+				print(f'ERROR: Account {i + 1} must have cookies, email+password, access_token, or github_cookie')
 				return None
 
 			if 'name' in account_dict and not account_dict['name']:
