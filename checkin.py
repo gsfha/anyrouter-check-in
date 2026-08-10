@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import sys
+import urllib.parse
 from datetime import datetime
 
 if hasattr(sys.stdout, 'reconfigure'):
@@ -41,6 +42,13 @@ from utils.proxy import get_playwright_proxy, get_proxy_server
 load_dotenv()
 
 BALANCE_HASH_FILE = 'balance_hash.txt'
+GITHUB_AUTHORIZE_URL = 'https://github.com/login/oauth/authorize'
+GITHUB_SESSION_COOKIE_NAMES = {
+	'user_session',
+	'__Host-user_session_same_site',
+	'_gh_sess',
+	'logged_in',
+}
 
 
 def load_balance_hash():
@@ -85,6 +93,11 @@ def parse_cookies(cookies_data):
 				cookies_dict[key] = value
 		return cookies_dict
 	return {}
+
+
+def select_cookies(cookies_data, allowed_names: set[str]) -> dict[str, str]:
+	"""Select only the named cookies needed by an OAuth provider."""
+	return {name: value for name, value in parse_cookies(cookies_data).items() if name in allowed_names and value}
 
 
 async def get_waf_cookies_with_browser(
@@ -147,6 +160,8 @@ async def login_with_credentials(
 	provider_name: str,
 	email: str,
 	password: str,
+	*,
+	force_relogin: bool = False,
 ) -> BrowserLoginResult | None:
 	"""使用邮箱密码通过浏览器登录，返回 cookies 与拦截到的 api user id。"""
 	print(f'[PROCESSING] {account_name}: Logging in with email/password...')
@@ -187,6 +202,17 @@ async def login_with_credentials(
 			provider=provider_name,
 			account_name=account_name,
 		)
+
+		if force_relogin and await is_logged_in(page):
+			print(f'[AUTH] {account_name}: Signing out before credential re-login')
+			await page.goto(f'{provider_config.domain}/api/user/logout', wait_until='domcontentloaded')
+			await navigate_login_page(
+				page,
+				login_url,
+				timeout_ms,
+				provider=provider_name,
+				account_name=account_name,
+			)
 
 		if not await is_logged_in(page):
 			if await has_session_cookie(page):
@@ -234,6 +260,119 @@ async def login_with_credentials(
 			await save_login_screenshot(page, provider_name, account_name, 'login-error')
 		await context.close()
 		return None
+
+
+async def run_agentrouter_oauth_relogin(
+	account_name: str,
+	account: AccountConfig,
+	provider_config,
+) -> tuple[bool, dict | None, dict | None]:
+	"""Replay GitHub OAuth so AgentRouter performs its login-time daily check-in."""
+	github_cookies = select_cookies(account.github_cookie, GITHUB_SESSION_COOKIE_NAMES)
+	if not github_cookies:
+		print(f'[FAILED] {account_name}: GitHub re-login cookie is missing or has no active session')
+		return False, None, None
+
+	login_url = f'{provider_config.domain}{provider_config.login_path}'
+	site_cookies = await get_waf_cookies_with_browser(
+		account_name,
+		login_url,
+		provider_config.waf_cookie_names,
+		use_proxy=provider_config.use_proxy,
+	)
+	if not site_cookies:
+		print(f'[FAILED] {account_name}: Unable to establish AgentRouter WAF session for re-login')
+		return False, None, None
+
+	client_kwargs: dict = {'http2': True, 'timeout': 30.0, 'follow_redirects': False}
+	proxy_url = get_proxy_server(use_proxy=provider_config.use_proxy)
+	if proxy_url:
+		client_kwargs['proxy'] = proxy_url
+
+	browser_user_agent = site_cookies.pop('__browser_user_agent__', None)
+	base_headers = {
+		'Accept': 'application/json, text/plain, */*',
+		'User-Agent': browser_user_agent
+		or 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/138.0.0.0 Safari/537.36',
+	}
+
+	try:
+		async with httpx.AsyncClient(**client_kwargs) as site_client:
+			site_client.cookies.update(site_cookies)
+			status_response = await site_client.get(f'{provider_config.domain}/api/status', headers=base_headers)
+			status_response.raise_for_status()
+			status_payload = status_response.json()
+			client_id = str((status_payload.get('data') or {}).get('github_client_id') or '')
+			if not client_id:
+				raise RuntimeError('AgentRouter did not publish github_client_id')
+
+			state_response = await site_client.get(
+				f'{provider_config.domain}/api/oauth/state?mode=login',
+				headers=base_headers,
+			)
+			state_response.raise_for_status()
+			state_payload = state_response.json()
+			state = str(state_payload.get('data') or '')
+			if not state_payload.get('success') or not state:
+				raise RuntimeError(state_payload.get('message') or 'OAuth state request failed')
+
+			authorize_url = f'{GITHUB_AUTHORIZE_URL}?{urllib.parse.urlencode({"client_id": client_id, "state": state, "scope": "user:email"})}'
+			async with httpx.AsyncClient(**client_kwargs) as github_client:
+				github_client.cookies.update(github_cookies)
+				authorize_response = await github_client.get(
+					authorize_url,
+					headers={
+						'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+						'User-Agent': base_headers['User-Agent'],
+					},
+				)
+
+			if authorize_response.status_code not in {301, 302, 303, 307, 308}:
+				raise RuntimeError(f'GitHub authorization did not redirect (HTTP {authorize_response.status_code})')
+			location = authorize_response.headers.get('location', '')
+			code = urllib.parse.parse_qs(urllib.parse.urlparse(location).query).get('code', [''])[0]
+			if not code:
+				raise RuntimeError('GitHub authorization redirect did not contain a code')
+
+			callback_query = urllib.parse.urlencode({'code': code, 'state': state, 'mode': 'login'})
+			callback_response = await site_client.get(
+				f'{provider_config.domain}/api/oauth/github?{callback_query}',
+				headers=base_headers,
+			)
+			callback_response.raise_for_status()
+			callback_payload = callback_response.json()
+			if not callback_payload.get('success'):
+				raise RuntimeError(callback_payload.get('message') or 'AgentRouter OAuth callback failed')
+
+			callback_data = callback_payload.get('data') if isinstance(callback_payload.get('data'), dict) else {}
+			api_user = account.api_user or str(callback_data.get('id') or '')
+			user_headers = dict(base_headers)
+			if api_user:
+				user_headers[provider_config.api_user_key] = api_user
+			user_info_url = f'{provider_config.domain}{provider_config.user_info_path}'
+			user_response = await site_client.get(user_info_url, headers=user_headers)
+			user_response.raise_for_status()
+			user_payload = user_response.json()
+			if not user_payload.get('success') or not isinstance(user_payload.get('data'), dict):
+				raise RuntimeError(user_payload.get('message') or 'User verification failed')
+			user_data = user_payload['data']
+			quota = round(user_data.get('quota', 0) / 500000, 2)
+			used_quota = round(user_data.get('used_quota', 0) / 500000, 2)
+			user_info_after = {
+				'success': True,
+				'quota': quota,
+				'used_quota': used_quota,
+				'display': f':money: Current balance: ${quota}, Used: ${used_quota}',
+			}
+
+			checked_in = bool(callback_data.get('checked_in'))
+			result = 'daily reward granted' if checked_in else 'login completed; already checked in today'
+			print(f'[SUCCESS] {account_name}: GitHub OAuth re-login completed ({result})')
+			print(user_info_after['display'])
+			return True, None, user_info_after
+	except Exception as exc:
+		print(f'[FAILED] {account_name}: GitHub OAuth re-login failed - {str(exc)[:160]}')
+		return False, None, None
 
 
 def get_user_info(client, headers, user_info_url: str):
@@ -450,6 +589,17 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 
 	print(f'[INFO] {account_name}: Using provider "{account.provider}" ({provider_config.domain})')
 
+	if provider_config.domain.rstrip('/') == 'https://agentrouter.org':
+		if account.github_cookie:
+			print(f'[AUTH] {account_name}: Using auth method -> GitHub OAuth re-login')
+			return await run_agentrouter_oauth_relogin(account_name, account, provider_config)
+		if not account.has_login_credentials():
+			print(
+				f'[FAILED] {account_name}: AgentRouter now checks in only during re-login; '
+				'configure github_cookie or email/password instead of a site cookie/access token'
+			)
+			return False, None, None
+
 	# 访问令牌优先，其次邮箱密码，最后使用浏览器会话 cookies
 	all_cookies = None
 	resolved_api_user: str | None = None
@@ -466,6 +616,7 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 			account.provider,
 			account.email,
 			account.password,
+			force_relogin=provider_config.domain.rstrip('/') == 'https://agentrouter.org',
 		)
 		if login_result:
 			all_cookies = login_result.cookies
@@ -533,7 +684,8 @@ def run_check_in_requests(
 			client.cookies.update(request_cookies)
 
 			headers = {
-				'User-Agent': browser_user_agent or 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
+				'User-Agent': browser_user_agent
+				or 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
 				'Accept': 'application/json, text/plain, */*',
 				'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
 				'Accept-Encoding': 'gzip, deflate, br, zstd',
