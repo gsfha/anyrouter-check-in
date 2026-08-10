@@ -83,6 +83,7 @@
 - `email` + `password`：推荐的浏览器登录方式，登录成功后会自动获取 cookies 与用户标识
 - `cookies`：兼容旧版的 session cookies 登录方式
 - `api_user`：session cookies 登录时用于请求头的 new-api-user 参数；邮箱密码登录可省略
+- `github_cookie`：AgentRouter 专用；GitHub 已登录会话中的完整 Cookie，用于重放 OAuth 退出/重新登录并触发每日额度
 - `provider` (可选)：指定使用的服务商，默认为 `anyrouter`
 - `name` (可选)：自定义账号显示名称，用于通知和日志中标识账号
 
@@ -172,6 +173,7 @@
   {
     "name": "AgentRouter 备用",
     "provider": "agentrouter",
+    "github_cookie": "user_session=...; _gh_sess=...; logged_in=yes",
     "cookies": {
       "session": "xyz789session"
     },
@@ -262,7 +264,7 @@
   - `sign_in_path: "/api/user/sign_in"`
 - `agentrouter`：
   - `bypass_method: "waf_cookies"`（需要获取 `acw_tc`）
-  - `sign_in_path: null`（查询用户信息时自动签到）
+  - `sign_in_path: null`（没有独立签到接口；必须通过邮箱密码或 `github_cookie` 重新登录）
   - `use_proxy: true`
 
 **重要提示**：
